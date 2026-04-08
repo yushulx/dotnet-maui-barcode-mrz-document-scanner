@@ -2,6 +2,8 @@
 
 A .NET MAUI Blazor application for scanning **barcodes**, **MRZ (Machine Readable Zones)**, and **documents** across multiple platforms. Built with the [Dynamsoft Capture Vision SDK](https://www.dynamsoft.com/capture-vision/docs/web/programming/javascript/).
 
+https://github.com/user-attachments/assets/64c35eaa-1f60-4de3-9f1f-68023c6cf613
+
 ## Supported Platforms
 
 | Platform | Target Framework |
