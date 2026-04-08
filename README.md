@@ -1,99 +1,62 @@
-# .NET MAUI Blazor Vision Scanner
+﻿# .NET MAUI Blazor Vision Scanner
+
 A .NET MAUI Blazor application for scanning **barcodes**, **MRZ (Machine Readable Zones)**, and **documents** across multiple platforms. Built with the [Dynamsoft Capture Vision SDK](https://www.dynamsoft.com/capture-vision/docs/web/programming/javascript/).
 
 ## Supported Platforms
-- **Windows** (WinUI 3)
-- **macOS** (Mac Catalyst)
-- **Android**
-- **iOS**
+
+| Platform | Target Framework |
+|---|---|
+| Android | net8.0-android |
+| iOS | net8.0-ios |
+| macOS | net8.0-maccatalyst |
+| Windows | net8.0-windows10.0.19041.0 |
 
 ## Features
-- **Barcode Scanning** — Decode 1D and 2D barcodes from images or live camera
-- **MRZ Recognition** — Read passport, ID card, and visa MRZ data with parsed fields (name, nationality, DOB, expiry, etc.)
-- **Document Scanning** — Detect document boundaries, rectify perspective, and save the result
-- **File Reader** — Load images to decode barcodes, MRZ, or detect documents
-- **Camera Scanner** — Real-time scanning via the device camera with camera selection
+
+### File Reader Mode
+- Load any image from the device file system
+- **Barcode** — Detects all 1D/2D barcodes and draws a colour-coded overlay directly on the image
+- **MRZ** — Reads passport, ID, and visa MRZ lines and parses structured fields (name, nationality, DOB, expiry, etc.)
+- **Document** — Detects document boundaries, overlays the detected quad, and opens an interactive quad editor
+- EXIF orientation is corrected automatically before processing — rotated camera photos are handled correctly
+
+### Camera Scanner Mode
+- Real-time scanning via the device camera
+- Camera selection dropdown (defaults to the first available camera)
+- **Barcode** — Continuous detection with live result display
+- **MRZ** — Continuous detection with a restricted scan region
+- **Document** — Detect and capture document boundaries; tap **Capture** to freeze the frame and open the editor
+
+### Document Quad Editor (File & Camera)
+- Four draggable corner handles — touch/pointer friendly on both mobile and desktop
+- Tap **Rectify** to apply an accurate perspective warp (homography) computed entirely in the browser via Canvas 2D — no server round-trip
+- After rectification the corrected image is displayed full-width in the overlay
+- Tap **Edit** to return to the quad editor and re-adjust the corners, then re-rectify
+- Tap **Save** to export via the native OS share sheet (Android/iOS) or file dialog (Windows/macOS)
 
 ## Prerequisites
 
 - [.NET 8 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
-- .NET MAUI workloads:
-  ```bash
-  dotnet workload install maui
-  ```
-- [Visual Studio 2022](https://visualstudio.microsoft.com/downloads/) (recommended) or command line
+- [Visual Studio 2022 17.8+](https://visualstudio.microsoft.com/downloads/) with the **.NET MAUI** workload installed
 
+## Getting Started
 
-## How to Use
+1. Get a free trial license key from the [Dynamsoft customer portal](https://www.dynamsoft.com/customer/license/trialLicense/?product=dcv&package=cross-platform).
 
-1. Get a trial license from [Dynamsoft Customer Portal](https://www.dynamsoft.com/customer/license/trialLicense/?product=dcv&package=cross-platform).
+2. Launch the app. Enter your license key on the **Activate SDK** screen and tap **Activate**.
 
-2. Launch the application and enter your license key on the Home page, then click **Activate**.
+3. Choose **File Reader** or **Camera Scanner**.
 
-3. Navigate to **File Reader** or **Camera Scanner** to start scanning.
+### File Reader
 
-4. Select the scan mode: **Barcode**, **MRZ**, or **Document**.
+1. Select the recognition mode: **Barcode**, **MRZ**, or **Document**.
+2. Tap the file picker and select an image.
+3. Results appear below the image. For **Document** mode the editor opens automatically — drag the corner handles to refine the boundary, then tap **Rectify**.
 
-## Build from Command Line
+### Camera Scanner
 
-**Android:**
-```bash
-dotnet build BarcodeScanner/BarcodeScanner.csproj -f net8.0-android
-```
+1. Grant camera permission when prompted.
+2. Select the recognition mode.
+3. For **Document** mode, tap **Capture** when the detected boundary looks correct.
+4. Adjust the quad handles in the editor, tap **Rectify**, then **Save** to export.
 
-**Windows:**
-```bash
-dotnet build BarcodeScanner/BarcodeScanner.csproj -f net8.0-windows10.0.19041.0
-```
-
-**macOS (on Mac):**
-```bash
-dotnet build BarcodeScanner/BarcodeScanner.csproj -f net8.0-maccatalyst
-```
-
-**iOS (on Mac):**
-```bash
-dotnet build BarcodeScanner/BarcodeScanner.csproj -f net8.0-ios
-```
-
-## Camera on macOS
-
-The camera is supported in the WKWebView on macOS through Mac Catalyst. The following configurations make it work:
-
-- **Entitlements**: `com.apple.security.device.camera` is set in `Platforms/MacCatalyst/Entitlements.Debug.plist` and `Entitlements.Release.plist`
-- **Info.plist**: `NSCameraUsageDescription` is included in `Platforms/MacCatalyst/Info.plist`
-- **WebView configuration**: `AllowsInlineMediaPlayback` and `MediaTypesRequiringUserActionForPlayback` are set in `WebContentPage.xaml.cs`
-
-## Project Structure
-
-```
-BarcodeScanner/
-├── Pages/
-│   ├── Index.razor          # Home page with license activation
-│   ├── Reader.razor         # File-based reader (barcode/MRZ/document)
-│   └── Scanner.razor        # Camera-based scanner (barcode/MRZ/document)
-├── Shared/
-│   ├── MainLayout.razor     # App layout with sidebar navigation
-│   └── NavMenu.razor        # Navigation menu
-├── Platforms/
-│   ├── Android/             # Android-specific (camera permissions, WebChromeClient)
-│   ├── iOS/                 # iOS-specific (camera permissions)
-│   ├── MacCatalyst/         # macOS-specific (entitlements for camera)
-│   └── Windows/             # Windows-specific
-├── wwwroot/
-│   ├── index.html           # Host page with Dynamsoft SDK script
-│   ├── jsInterop.js         # JS interop for SDK operations
-│   └── full.json            # MRZ recognition configuration
-├── WebContentPage.xaml      # BlazorWebView container
-└── BarcodeScanner.csproj    # Project file (net8.0 multi-target)
-```
-
-## SDK Reference
-
-This project uses [Dynamsoft Capture Vision Bundle v3.2.5000](https://cdn.jsdelivr.net/npm/dynamsoft-capture-vision-bundle@3.2.5000/) which includes:
-
-- **Dynamsoft Barcode Reader** — 1D/2D barcode decoding
-- **Dynamsoft Label Recognizer** — MRZ text line recognition
-- **Dynamsoft Document Normalizer** — Document boundary detection and perspective correction
-- **Dynamsoft Code Parser** — MRZ data parsing
-- **Dynamsoft Camera Enhancer** — Camera management for live scanning
