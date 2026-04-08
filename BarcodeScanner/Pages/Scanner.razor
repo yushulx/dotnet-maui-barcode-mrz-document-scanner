@@ -1,84 +1,340 @@
-@page "/barcodescanner"
+@page "/scanner"
 
 @inject IJSRuntime JSRuntime
 
-@if (isGranted == false)
+<div class="scanner-container">
+    <div class="controls">
+        <div class="mode-selector">
+            <label class="radio-card">
+                <input type="radio" name="scanMode" value="barcode"
+                    checked="@(selectedMode == "barcode")" @onchange="@(() => ChangeMode("barcode"))" />
+                <span class="radio-label @(selectedMode == "barcode" ? "active" : "")">Barcode</span>
+            </label>
+            <label class="radio-card">
+                <input type="radio" name="scanMode" value="mrz"
+                    checked="@(selectedMode == "mrz")" @onchange="@(() => ChangeMode("mrz"))" />
+                <span class="radio-label @(selectedMode == "mrz" ? "active" : "")">MRZ</span>
+            </label>
+            <label class="radio-card">
+                <input type="radio" name="scanMode" value="document"
+                    checked="@(selectedMode == "document")" @onchange="@(() => ChangeMode("document"))" />
+                <span class="radio-label @(selectedMode == "document" ? "active" : "")">Document</span>
+            </label>
+        </div>
+
+        @if (cameraLabels != null && cameraLabels.Length > 0)
+        {
+            <div class="camera-select">
+                <label>Camera:</label>
+                <select @onchange="CameraChanged">
+                    @for (int i = 0; i < cameraLabels.Length; i++)
+                    {
+                        <option value="@i">@cameraLabels[i]</option>
+                    }
+                </select>
+            </div>
+        }
+
+        @if (selectedMode == "document")
+        {
+            <button class="btn btn-capture" @onclick="CaptureDocument">Capture</button>
+        }
+    </div>
+
+    @if (!isGranted)
+    {
+        <p class="error-text">Camera is not accessible!</p>
+    }
+
+    <div class="video-section">
+        <div id="camera_view"></div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(scanResult))
+    {
+        <div class="result-section">
+            <h3>Scan Results</h3>
+            <pre class="result-text">@scanResult</pre>
+        </div>
+    }
+
+    @if (showDocumentEditor)
+    {
+        <div class="editor-overlay">
+            <div class="editor-content">
+                <h3>Document Editor</h3>
+
+                @if (isEditingQuad)
+                {
+                    <p class="hint-text">Drag the corner handles to adjust boundaries, then tap Rectify.</p>
+                    <div class="quad-editor-wrapper">
+                        <img id="scanner_editor_image" src="@capturedImage" class="quad-editor-img" alt="Captured" />
+                        <canvas id="scanner_editor_canvas" class="quad-editor-canvas"></canvas>
+                    </div>
+                    <div class="editor-buttons">
+                        <button class="btn btn-editor" @onclick="RectifyDocument" disabled="@isLoading">Rectify</button>
+                        <button class="btn btn-editor btn-close" @onclick="CloseEditor" disabled="@isLoading">Close</button>
+                    </div>
+                }
+                else
+                {
+                    <div class="rectified-section">
+                        <h4>Rectified Document</h4>
+                        <img src="@rectifiedImage" alt="Rectified" class="rectified-image" />
+                    </div>
+                    <div class="editor-buttons">
+                        <button class="btn btn-editor btn-edit" @onclick="EditQuad">Edit</button>
+                        <button class="btn btn-editor btn-save" @onclick="SaveDocument">Save</button>
+                        <button class="btn btn-editor btn-close" @onclick="CloseEditor">Close</button>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@if (isLoading)
 {
-    <p>Camera is not accessible!</p>
+    <div class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
 }
-else {
-    <div class="select">
-    <label for="videoSource">Video source: </label>
-    <select id="videoSource"></select>
-</div>
-
-<div id="videoview">
-    <div class="dce-video-container" id="videoContainer"></div>
-    <canvas id="overlay"></canvas>
-</div>
-}
-
 
 @code {
+    private string selectedMode = "barcode";
     private bool isGranted = false;
-    String result = "";
+    private bool isLoading = false;
+    private string scanResult = "";
+    private string[] cameraLabels;
     private DotNetObjectReference<Scanner> objRef;
-
-    @* https://docs.microsoft.com/en-us/aspnet/core/blazor/images?view=aspnetcore-6.0 *@
-    private async Task LoadImage(InputFileChangeEventArgs e)
-    {
-        result = "";
-
-        var imageFile = e.File;
-        var jsImageStream = imageFile.OpenReadStream(1024 * 1024 * 20);
-        var dotnetImageStream = new DotNetStreamReference(jsImageStream);
-        await JSRuntime.InvokeAsync<byte[]>("jsFunctions.setImageUsingStreaming",
-        "image", dotnetImageStream);
-    }
+    private bool _disposed = false;
+    private bool _pendingQuadInit = false;
+    private bool showDocumentEditor = false;
+    private bool isEditingQuad = true;
+    private string capturedImage = "";
+    private string capturedPointsJson = "";
+    private string rectifiedImage = "";
 
     protected override void OnInitialized()
     {
-        //objRef = DotNetObjectReference.Create(this);
-
+        objRef = DotNetObjectReference.Create(this);
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
         {
-            var status = await Permissions.CheckStatusAsync<Permissions.Camera>();
-            if (status == PermissionStatus.Granted)
+            try
             {
-                isGranted = true;
-            }
-            else
-            {
-                status = await Permissions.RequestAsync<Permissions.Camera>();
+                var status = await Permissions.CheckStatusAsync<Permissions.Camera>();
+                if (status != PermissionStatus.Granted)
+                    status = await Permissions.RequestAsync<Permissions.Camera>();
+
                 if (status == PermissionStatus.Granted)
                 {
                     isGranted = true;
+                    StateHasChanged();
+
+                    cameraLabels = await JSRuntime.InvokeAsync<string[]>(
+                        "jsFunctions.initScanner", objRef, "camera_view", "camera_select", selectedMode);
+
+                    if (cameraLabels != null && cameraLabels.Length > 0)
+                    {
+                        StateHasChanged();
+                        await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", 0);
+                        await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+                    }
                 }
             }
-
-            if (isGranted)
+            catch (Exception ex)
             {
-                StateHasChanged();
-                objRef = DotNetObjectReference.Create(this);
-                await JSRuntime.InvokeAsync<Boolean>("jsFunctions.initScanner", objRef, "videoContainer", "videoSource", "overlay");
+                Console.Error.WriteLine("Scanner init error: " + ex.Message);
+            }
+            finally
+            {
+                if (!_disposed) StateHasChanged();
+            }
+        }
+
+        if (_pendingQuadInit && showDocumentEditor && isEditingQuad && !string.IsNullOrEmpty(capturedPointsJson))
+        {
+            _pendingQuadInit = false;
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("jsFunctions.initQuadEditor",
+                    "scanner_editor_canvas", "scanner_editor_image", capturedPointsJson);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Scanner quad editor init error: " + ex.Message);
             }
         }
     }
 
+    private async Task ChangeMode(string mode)
+    {
+        selectedMode = mode;
+        scanResult = "";
+        showDocumentEditor = false;
+        rectifiedImage = "";
+        StateHasChanged();
+
+        if (isGranted)
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("jsFunctions.stopScanning");
+                await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("ChangeMode error: " + ex.Message);
+            }
+        }
+    }
+
+    private async Task CameraChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int index))
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", index);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("CameraChanged error: " + ex.Message);
+            }
+        }
+    }
+
+    private async Task CaptureDocument()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("jsFunctions.captureDocument");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("CaptureDocument error: " + ex.Message);
+        }
+    }
+
+    private async Task RectifyDocument()
+    {
+        if (string.IsNullOrEmpty(capturedImage)) return;
+
+        isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            // Prefer user-adjusted quad points from the editor
+            var editedPoints = await JSRuntime.InvokeAsync<string>("jsFunctions.getQuadEditorPoints");
+            if (!string.IsNullOrEmpty(editedPoints) && editedPoints != "[]")
+                capturedPointsJson = editedPoints;
+
+            if (string.IsNullOrEmpty(capturedPointsJson)) return;
+
+            rectifiedImage = await JSRuntime.InvokeAsync<string>(
+                "jsFunctions.rectifyDocument", capturedImage, capturedPointsJson);
+
+            if (!string.IsNullOrEmpty(rectifiedImage))
+                isEditingQuad = false;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("RectifyDocument error: " + ex.Message);
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void EditQuad()
+    {
+        isEditingQuad = true;
+        _pendingQuadInit = true;
+        StateHasChanged();
+    }
+
+    private async Task SaveDocument()
+    {
+        if (!string.IsNullOrEmpty(rectifiedImage))
+        {
+            try
+            {
+                var base64data = rectifiedImage.Contains(",")
+                    ? rectifiedImage.Split(',')[1]
+                    : rectifiedImage;
+                var imageBytes = Convert.FromBase64String(base64data);
+                var filename = $"document_{DateTime.Now:yyyyMMdd_HHmmss}.jpg";
+                var tempPath = Path.Combine(FileSystem.CacheDirectory, filename);
+                await File.WriteAllBytesAsync(tempPath, imageBytes);
+                await Share.RequestAsync(new ShareFileRequest
+                {
+                    Title = "Save Document",
+                    File = new ShareFile(tempPath, "image/jpeg")
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("SaveDocument error: " + ex.Message);
+            }
+        }
+    }
+
+    private async Task CloseEditor()
+    {
+        showDocumentEditor = false;
+        isEditingQuad = true;
+        rectifiedImage = "";
+        StateHasChanged();
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("CloseEditor error: " + ex.Message);
+        }
+    }
 
     [JSInvokable]
-    public void ReturnBarcodeResultsAsync(String text)
+    public void OnScanResultReceived(string text)
     {
-        result = text;
-        StateHasChanged();
+        if (_disposed) return;
+        scanResult = text;
+        InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public void OnDocumentCaptured(string imageData, string pointsJson)
+    {
+        if (_disposed) return;
+        capturedImage = imageData;
+        capturedPointsJson = pointsJson;
+        showDocumentEditor = true;
+        isEditingQuad = true;
+        rectifiedImage = "";
+        _pendingQuadInit = true;
+        InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public void OnLoadingChanged(bool loading)
+    {
+        if (_disposed) return;
+        isLoading = loading;
+        InvokeAsync(StateHasChanged);
     }
 
     public void Dispose()
     {
+        _disposed = true;
         objRef?.Dispose();
     }
 }

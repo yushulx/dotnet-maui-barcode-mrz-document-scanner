@@ -3,38 +3,88 @@
 @inject NavigationManager NavigationManager
 @using Microsoft.AspNetCore.Components.Web;
 
-@if (initialized == false)
+<div class="license-container">
+    <h2>Activate SDK</h2>
+    <p class="info-text">
+        Get a License key from
+        <a href="https://www.dynamsoft.com/customer/license/trialLicense/?product=dcv&package=cross-platform"
+           target="_blank">here</a>
+    </p>
+    <div class="input-group">
+        <input type="text" @bind="licenseKey" placeholder="Enter your license key" class="license-input" />
+        <button class="btn btn-activate" @onclick="Activate" disabled="@isActivating">
+            @(isActivating ? "Activating..." : "Activate")
+        </button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(statusMessage))
+    {
+        <p class="status-message @(isActivated ? "success" : "error")">@statusMessage</p>
+    }
+
+    @if (isActivated)
+    {
+        <div class="nav-buttons">
+            <button class="btn btn-nav" @onclick='() => NavigationManager.NavigateTo("reader")'>
+                File Reader
+            </button>
+            <button class="btn btn-nav" @onclick='() => NavigationManager.NavigateTo("scanner")'>
+                Camera Scanner
+            </button>
+        </div>
+    }
+</div>
+
+@if (isLoading)
 {
-    <p>Initializing Dynamsoft Barcode Reader SDK...</p>
-}
-else {
-    <div class="container">
-        <button class="btn" @onclick="StartReader">Barcode Reader</button>
-        <button class="btn" @onclick="StartScanner">Barcode Scanner</button>
+    <div class="loading-overlay">
+        <div class="spinner"></div>
     </div>
 }
 
 @code {
-    Boolean initialized = false;
+    private string licenseKey = "DLS2eyJoYW5kc2hha2VDb2RlIjoiMjAwMDAxLTE2NDk4Mjk3OTI2MzUiLCJvcmdhbml6YXRpb25JRCI6IjIwMDAwMSIsInNlc3Npb25QYXNzd29yZCI6IndTcGR6Vm05WDJrcEQ5YUoifQ==";
+    private bool isActivating = false;
+    private bool isActivated = false;
+    private bool isLoading = false;
+    private string statusMessage = "";
+    private DotNetObjectReference<Index> objRef;
 
     protected override void OnInitialized()
     {
-        Init();
+        objRef = DotNetObjectReference.Create(this);
     }
 
-    public async void Init()
+    private async Task Activate()
     {
-        initialized = await JSRuntime.InvokeAsync<Boolean>("jsFunctions.initSDK");
+        if (string.IsNullOrWhiteSpace(licenseKey)) return;
+        isActivating = true;
+        statusMessage = "";
+        StateHasChanged();
+
+        try
+        {
+            isActivated = await JSRuntime.InvokeAsync<bool>("jsFunctions.initSDK", objRef, licenseKey);
+            statusMessage = isActivated ? "SDK activated successfully!" : "SDK activation failed.";
+        }
+        catch (Exception ex)
+        {
+            statusMessage = "Error: " + ex.Message;
+        }
+
+        isActivating = false;
         StateHasChanged();
     }
 
-    public void StartReader()
+    [JSInvokable]
+    public void OnLoadingChanged(bool loading)
     {
-        NavigationManager.NavigateTo("barcodereader");
+        isLoading = loading;
+        InvokeAsync(StateHasChanged);
     }
 
-    public void StartScanner()
+    public void Dispose()
     {
-        NavigationManager.NavigateTo("barcodescanner");
+        objRef?.Dispose();
     }
 }

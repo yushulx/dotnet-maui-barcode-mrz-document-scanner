@@ -1,24 +1,128 @@
-﻿.container {
+﻿.license-container {
+    max-width: 600px;
+    margin: 40px auto;
+    padding: 30px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.license-container h2 {
+    color: #667eea;
+    margin-bottom: 15px;
+}
+
+.info-text {
+    color: #666;
+    margin-bottom: 15px;
+}
+
+.info-text a {
+    color: #667eea;
+    text-decoration: none;
+}
+
+.input-group {
     display: flex;
-    justify-content: center;
-    align-items: center;
-    height: 100vh;
-    /* set the height of the container to the height of the viewport */
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
-.btn {
-    margin: 0 10px;
-    padding: 10px 20px;
-    font-size: 18px;
-    font-weight: bold;
-    color: #fff;
-    background-color: #4CAF50;
+.license-input {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px 14px;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    font-size: 0.95rem;
+}
+
+.license-input:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+.btn-activate {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 10px 24px;
     border: none;
-    border-radius: 5px;
+    border-radius: 8px;
+    font-weight: 600;
     cursor: pointer;
-    transition: all 0.3s ease;
 }
 
-.btn:hover {
-    background-color: #357a38;
+.btn-activate:hover {
+    opacity: 0.9;
+}
+
+.status-message {
+    margin-top: 15px;
+    padding: 10px;
+    border-radius: 8px;
+    font-weight: 500;
+}
+
+.status-message.success {
+    background: #e6f9e6;
+    color: #2e7d32;
+}
+
+.status-message.error {
+    background: #fdecea;
+    color: #c62828;
+}
+
+.nav-buttons {
+    display: flex;
+    gap: 15px;
+    margin-top: 25px;
+    flex-wrap: wrap;
+}
+
+.btn-nav {
+    flex: 1;
+    min-width: 150px;
+    padding: 14px 24px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+}
+
+.btn-nav:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.spinner {
+    width: 50px;
+    height: 50px;
+    border: 5px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #667eea;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
 }

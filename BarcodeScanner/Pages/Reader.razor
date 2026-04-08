@@ -1,48 +1,230 @@
-﻿@page "/barcodereader"
+﻿@page "/reader"
 @inject IJSRuntime JSRuntime
 
-<InputFile OnChange="LoadImage" />
-@*<button @onclick="ReadBarcodes">HTML Input</button>*@
-<p class="p-result">@result</p>
+<div class="reader-container">
+    <div class="controls">
+        <div class="mode-selector">
+            <label class="radio-card">
+                <input type="radio" name="readMode" value="barcode"
+                    checked="@(selectedMode == "barcode")" @onchange="@(() => ChangeMode("barcode"))" />
+                <span class="radio-label @(selectedMode == "barcode" ? "active" : "")">Barcode</span>
+            </label>
+            <label class="radio-card">
+                <input type="radio" name="readMode" value="mrz"
+                    checked="@(selectedMode == "mrz")" @onchange="@(() => ChangeMode("mrz"))" />
+                <span class="radio-label @(selectedMode == "mrz" ? "active" : "")">MRZ</span>
+            </label>
+            <label class="radio-card">
+                <input type="radio" name="readMode" value="document"
+                    checked="@(selectedMode == "document")" @onchange="@(() => ChangeMode("document"))" />
+                <span class="radio-label @(selectedMode == "document" ? "active" : "")">Document</span>
+            </label>
+        </div>
+    </div>
 
-<div id="imageview">
-    <img id="image" />
-    <canvas id="overlay"></canvas>
+    <div class="upload-section">
+        <InputFile OnChange="LoadImage" accept="image/*" />
+    </div>
+
+    <div class="image-section">
+        <div class="image-wrapper" id="image_wrapper">
+            <img id="reader_image" />
+            <canvas id="reader_overlay"></canvas>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(result))
+    {
+        <div class="result-section">
+            <h3>Results</h3>
+            <pre class="result-text">@result</pre>
+        </div>
+    }
+
+    @if (showDocumentEditor)
+    {
+        <div class="editor-section">
+            <h3>Document Editor</h3>
+            <p class="hint-text">Drag the corner handles to adjust boundaries, then tap Rectify.</p>
+            <div class="quad-editor-wrapper" id="quad_editor_wrapper">
+                <img id="quad_editor_image" src="@currentImageBase64" class="quad-editor-img" />
+                <canvas id="quad_editor_canvas" class="quad-editor-canvas"></canvas>
+            </div>
+            <div class="editor-buttons">
+                <button class="btn btn-rectify" @onclick="RectifyDocument">Rectify</button>
+                @if (!string.IsNullOrEmpty(rectifiedImage))
+                {
+                    <button class="btn btn-save" @onclick="SaveDocument">Save</button>
+                }
+            </div>
+            @if (!string.IsNullOrEmpty(rectifiedImage))
+            {
+                <div class="rectified-section">
+                    <h4>Rectified Document</h4>
+                    <img src="@rectifiedImage" alt="Rectified document" class="rectified-image" />
+                </div>
+            }
+        </div>
+    }
 </div>
 
+@if (isLoading)
+{
+    <div class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+}
+
 @code {
-    String result = "";
+    private string selectedMode = "barcode";
+    private string result = "";
+    private string currentImageBase64 = "";
+    private string detectedPointsJson = "";
+    private string rectifiedImage = "";
+    private bool showDocumentEditor = false;
+    private bool isLoading = false;
+    private bool _pendingQuadInit = false;
     private DotNetObjectReference<Reader> objRef;
-
-    @* https://docs.microsoft.com/en-us/aspnet/core/blazor/images?view=aspnetcore-6.0 *@
-    private async Task LoadImage(InputFileChangeEventArgs e)
-    {
-        result = "";
-
-        var imageFile = e.File;
-        var jsImageStream = imageFile.OpenReadStream(1024 * 1024 * 20);
-        var dotnetImageStream = new DotNetStreamReference(jsImageStream);
-        await JSRuntime.InvokeAsync<byte[]>("jsFunctions.setImageUsingStreaming", objRef, "overlay",
-        "image", dotnetImageStream);
-    }
 
     protected override void OnInitialized()
     {
         objRef = DotNetObjectReference.Create(this);
     }
 
-
-    public async Task ReadBarcodes()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        await JSRuntime.InvokeVoidAsync(
-        "jsFunctions.selectFile", objRef, "overlay", "image");
+        if (_pendingQuadInit && showDocumentEditor && !string.IsNullOrEmpty(detectedPointsJson))
+        {
+            _pendingQuadInit = false;
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("jsFunctions.initQuadEditor",
+                    "quad_editor_canvas", "quad_editor_image", detectedPointsJson);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Quad editor init error: " + ex.Message);
+            }
+        }
+    }
+
+    private void ChangeMode(string mode)
+    {
+        selectedMode = mode;
+        result = "";
+        showDocumentEditor = false;
+        rectifiedImage = "";
+        StateHasChanged();
+    }
+
+    private async Task LoadImage(InputFileChangeEventArgs e)
+    {
+        result = "";
+        showDocumentEditor = false;
+        rectifiedImage = "";
+        isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var imageFile = e.File;
+            await using var jsImageStream = imageFile.OpenReadStream(1024 * 1024 * 20);
+            var dotnetImageStream = new DotNetStreamReference(jsImageStream);
+
+            currentImageBase64 = await JSRuntime.InvokeAsync<string>(
+                "jsFunctions.setImageUsingStreaming", objRef, "reader_image", dotnetImageStream, selectedMode);
+
+            if (!string.IsNullOrEmpty(currentImageBase64))
+            {
+                result = await JSRuntime.InvokeAsync<string>(
+                    "jsFunctions.decodeFile", objRef, currentImageBase64, selectedMode);
+
+                if (selectedMode == "document" && result != "No document found" && !result.StartsWith("Error"))
+                {
+                    detectedPointsJson = result;
+                    showDocumentEditor = true;
+                    _pendingQuadInit = true;
+                    result = "Document boundaries detected. Drag the corners to adjust, then tap Rectify.";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            result = "Error: " + ex.Message;
+            Console.Error.WriteLine("LoadImage error: " + ex.Message);
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RectifyDocument()
+    {
+        if (string.IsNullOrEmpty(currentImageBase64)) return;
+
+        isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            // Get the (possibly user-adjusted) quad points from the editor
+            var editedPoints = await JSRuntime.InvokeAsync<string>("jsFunctions.getQuadEditorPoints");
+            if (!string.IsNullOrEmpty(editedPoints) && editedPoints != "[]")
+                detectedPointsJson = editedPoints;
+
+            if (string.IsNullOrEmpty(detectedPointsJson)) return;
+
+            rectifiedImage = await JSRuntime.InvokeAsync<string>(
+                "jsFunctions.rectifyDocument", currentImageBase64, detectedPointsJson);
+
+            if (string.IsNullOrEmpty(rectifiedImage))
+                result = "Rectification failed.";
+        }
+        catch (Exception ex)
+        {
+            result = "Error: " + ex.Message;
+            Console.Error.WriteLine("RectifyDocument error: " + ex.Message);
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SaveDocument()
+    {
+        if (!string.IsNullOrEmpty(rectifiedImage))
+        {
+            try
+            {
+                var base64data = rectifiedImage.Contains(",")
+                    ? rectifiedImage.Split(',')[1]
+                    : rectifiedImage;
+                var imageBytes = Convert.FromBase64String(base64data);
+                var filename = $"document_{DateTime.Now:yyyyMMdd_HHmmss}.jpg";
+                var tempPath = Path.Combine(FileSystem.CacheDirectory, filename);
+                await File.WriteAllBytesAsync(tempPath, imageBytes);
+                await Share.RequestAsync(new ShareFileRequest
+                {
+                    Title = "Save Document",
+                    File = new ShareFile(tempPath, "image/jpeg")
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("SaveDocument error: " + ex.Message);
+            }
+        }
     }
 
     [JSInvokable]
-    public void ReturnBarcodeResultsAsync(String text)
+    public void OnLoadingChanged(bool loading)
     {
-        result = text;
-        StateHasChanged();
+        isLoading = loading;
+        InvokeAsync(StateHasChanged);
     }
 
     public void Dispose()
