@@ -514,6 +514,18 @@ window.jsFunctions = {
             return cameraLabels;
         }
 
+        // cameraEnhancer already exists (re-navigation) — re-attach the camera
+        // view UI element to the freshly-rendered DOM container.
+        try {
+            const uiElement = document.getElementById(cameraViewId);
+            const camUI = cameraView.getUIElement();
+            if (uiElement && !uiElement.contains(camUI)) {
+                uiElement.append(camUI);
+            }
+        } catch (ex) {
+            console.error('initScanner re-attach error:', ex);
+        }
+
         return cameras ? cameras.map(c => c.label) : [];
     },
 

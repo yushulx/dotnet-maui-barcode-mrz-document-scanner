@@ -336,5 +336,8 @@
     {
         _disposed = true;
         objRef?.Dispose();
+        // Stop scanning and close camera so resources are freed when navigating away.
+        // Fire-and-forget is intentional here; Dispose cannot be async.
+        try { JSRuntime.InvokeVoidAsync("jsFunctions.closeCamera"); } catch { }
     }
 }
