@@ -1,15 +1,25 @@
 let cvr = null;
-let cameraEnhancer = null;
-let cameraView = null;
 let parser = null;
 let isSDKReady = false;
-let cameras = null;
-let resolution = null;
 let isDetecting = false;
 let isCaptured = false;
 let globalPoints = null;
 let dotnetHelper = null;
 let currentMode = 'barcode';
+
+// ── Web camera (getUserMedia) ───────────────────────────────────────────────
+let videoElement = null;
+let cameraOverlay = null;
+let cameraStream = null;
+let cameraAnimationFrame = null;
+let availableCameras = [];
+let isProcessingFrame = false;
+
+// ── Native camera (macOS – WKWebView lacks getUserMedia) ────────────────────
+let useNativeCamera = false;
+let nativeCameraImg = null;
+let nativeFrameProcessing = false;
+let nativePollingTimer = null;  // setInterval handle for JS-polls-C# frame fetching
 
 // ── Overlay helpers for file-mode image ──────────────────────────────────────
 function syncOverlayToImage(canvasId, imgId) {
@@ -262,6 +272,110 @@ function toggleLoading(isLoading) {
     }
 }
 
+// ── Camera overlay drawing ──────────────────────────────────────────────────
+function drawCameraOverlayQuad(ctx, points, color, lineWidth) {
+    if (!points || points.length < 4) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    for (let i = 0; i < points.length; i++) {
+        ctx.beginPath();
+        ctx.arc(points[i].x, points[i].y, 6, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+}
+
+// ── Template helper ─────────────────────────────────────────────────────────
+function getTemplateName() {
+    if (currentMode === 'barcode') return 'ReadBarcodes_Default';
+    if (currentMode === 'mrz') return 'ReadMRZ';
+    if (currentMode === 'document') return 'DetectDocumentBoundaries_Default';
+    return 'ReadBarcodes_Default';
+}
+
+// ── Camera result processing (shared by web & native paths) ─────────────────
+async function processCameraResult(result, sourceCanvasOrDataUrl) {
+    let items = result.items;
+
+    let overlayCtx = null;
+    if (cameraOverlay) {
+        overlayCtx = cameraOverlay.getContext('2d');
+        overlayCtx.clearRect(0, 0, cameraOverlay.width, cameraOverlay.height);
+    }
+
+    if (!items || items.length === 0) return;
+
+    let txts = [];
+
+    for (let item of items) {
+        if (currentMode === 'barcode' &&
+            item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_BARCODE) {
+            txts.push(item.text);
+            globalPoints = item.location.points;
+            if (overlayCtx) drawCameraOverlayQuad(overlayCtx, item.location.points, '#00ff00', 3);
+        }
+        else if (currentMode === 'mrz' &&
+                 item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE) {
+            txts.push(item.text);
+            globalPoints = item.location.points;
+            if (overlayCtx) drawCameraOverlayQuad(overlayCtx, item.location.points, '#00ff00', 2);
+        }
+        else if (currentMode === 'document' &&
+                 item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_DETECTED_QUAD) {
+            globalPoints = item.location.points;
+            if (overlayCtx) drawCameraOverlayQuad(overlayCtx, item.location.points, '#00ff00', 3);
+
+            if (isCaptured) {
+                isCaptured = false;
+                isDetecting = false;
+                if (cameraAnimationFrame) {
+                    cancelAnimationFrame(cameraAnimationFrame);
+                    cameraAnimationFrame = null;
+                }
+                let imageData;
+                if (typeof sourceCanvasOrDataUrl === 'string') {
+                    imageData = sourceCanvasOrDataUrl;
+                } else if (sourceCanvasOrDataUrl && sourceCanvasOrDataUrl.toDataURL) {
+                    imageData = sourceCanvasOrDataUrl.toDataURL();
+                }
+                if (imageData && dotnetHelper) {
+                    dotnetHelper.invokeMethodAsync('OnDocumentCaptured', imageData,
+                        JSON.stringify(globalPoints));
+                }
+                return;
+            }
+        }
+    }
+
+    if (currentMode === 'barcode' && txts.length > 0 && dotnetHelper) {
+        dotnetHelper.invokeMethodAsync('OnScanResultReceived', txts.join('\n'));
+    }
+    else if (currentMode === 'mrz' && txts.length > 0 && dotnetHelper) {
+        let lastMrzItem = null;
+        for (let item of items) {
+            if (item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE) {
+                lastMrzItem = item;
+            }
+        }
+        if (lastMrzItem) {
+            try {
+                let newText = lastMrzItem.text.replace(/\\n/g, '');
+                let parseResults = await parser.parse(newText);
+                let info = extractMrzInfo(parseResults);
+                dotnetHelper.invokeMethodAsync('OnScanResultReceived',
+                    txts.join('\n') + '\n\n' + JSON.stringify(info, null, 2));
+            } catch (ex) {
+                dotnetHelper.invokeMethodAsync('OnScanResultReceived', txts.join('\n'));
+            }
+        }
+    }
+}
+
 function extractMrzInfo(result) {
     const parseResultInfo = {};
     let type = result.getFieldValue("documentCode");
@@ -299,95 +413,163 @@ function extractMrzInfo(result) {
     return parseResultInfo;
 }
 
-async function showCameraResult(result) {
-    let items = result.items;
-    let txts = [];
+// ── DCE result receiver (web camera path) ────────────────────────────────────
+async function processDCEResult(result) {
+    if (!isDetecting) return;
+    const items = result.items;
+    if (!items || items.length === 0) return;
 
-    let type;
-    if (currentMode === "barcode") {
-        type = Dynamsoft.Core.EnumCapturedResultItemType.CRIT_BARCODE;
-    } else if (currentMode === "mrz") {
-        type = Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE;
-    } else if (currentMode === "document") {
-        type = Dynamsoft.Core.EnumCapturedResultItemType.CRIT_DETECTED_QUAD;
+    let txts = [];
+    for (let item of items) {
+        if (currentMode === 'barcode' &&
+            item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_BARCODE) {
+            txts.push(item.text);
+            globalPoints = item.location.points;
+        }
+        else if (currentMode === 'mrz' &&
+                 item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE) {
+            txts.push(item.text);
+            globalPoints = item.location.points;
+        }
+        else if (currentMode === 'document' &&
+                 item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_DETECTED_QUAD) {
+            globalPoints = item.location.points;
+        }
+        else if (currentMode === 'document' &&
+                 item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_ORIGINAL_IMAGE) {
+            if (isCaptured) {
+                isCaptured = false;
+                isDetecting = false;
+                await cvr.stopCapturing();
+                const imageData = item.imageData.toCanvas().toDataURL();
+                if (dotnetHelper) {
+                    dotnetHelper.invokeMethodAsync('OnDocumentCaptured', imageData,
+                        JSON.stringify(globalPoints));
+                }
+                return;
+            }
+        }
     }
 
-    if (items != null && items.length > 0) {
-        for (var i = 0; i < items.length; ++i) {
-            let item = items[i];
-            if (items[i].type === type) {
-                txts.push(item.text);
-                globalPoints = item.location.points;
-
-                if (currentMode === "barcode") {
-                    if (dotnetHelper) {
-                        dotnetHelper.invokeMethodAsync('OnScanResultReceived', txts.join('\n'));
-                    }
-                } else if (currentMode === "mrz") {
-                    if (txts.length > 0) {
-                        let newText = item.text.replace(/\\n/g, '');
-                        let parseResults = await parser.parse(newText);
-                        let info = extractMrzInfo(parseResults);
-                        if (dotnetHelper) {
-                            dotnetHelper.invokeMethodAsync('OnScanResultReceived',
-                                txts.join('\n') + '\n\n' + JSON.stringify(info, null, 2));
-                        }
-                    }
-                }
-            } else if (items[i].type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_ORIGINAL_IMAGE) {
-                if (currentMode === "document") {
-                    if (isCaptured) {
-                        isCaptured = false;
-                        await stopScanning();
-                        let imageData = item.imageData.toCanvas().toDataURL();
-                        if (dotnetHelper) {
-                            dotnetHelper.invokeMethodAsync('OnDocumentCaptured', imageData,
-                                JSON.stringify(globalPoints));
-                        }
-                    }
-                }
+    if (currentMode === 'barcode' && txts.length > 0 && dotnetHelper) {
+        dotnetHelper.invokeMethodAsync('OnScanResultReceived', txts.join('\n'));
+    }
+    else if (currentMode === 'mrz' && txts.length > 0 && dotnetHelper) {
+        let lastMrzItem = null;
+        for (let item of items) {
+            if (item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE)
+                lastMrzItem = item;
+        }
+        if (lastMrzItem) {
+            try {
+                let newText = lastMrzItem.text.replace(/\\n/g, '');
+                let parseResults = await parser.parse(newText);
+                let info = extractMrzInfo(parseResults);
+                dotnetHelper.invokeMethodAsync('OnScanResultReceived',
+                    txts.join('\n') + '\n\n' + JSON.stringify(info, null, 2));
+            } catch (ex) {
+                dotnetHelper.invokeMethodAsync('OnScanResultReceived', txts.join('\n'));
             }
         }
     }
 }
 
 async function startScanning() {
-    if (!isSDKReady) return;
+    if (!isSDKReady || !cvr) return;
     if (isDetecting) return;
 
-    isDetecting = true;
-    cvr.setInput(cameraEnhancer);
-
-    if (currentMode === "mrz") {
-        let scanRegion = {
-            x: 10, y: 30, width: 80, height: 40, isMeasuredInPercentage: true
-        };
-        cameraEnhancer.setScanRegion(scanRegion);
-        await cvr.initSettings("./full.json");
-        cvr.startCapturing("ReadMRZ");
-    } else if (currentMode === "barcode") {
-        cameraEnhancer.setScanRegion(null);
+    // Initialise settings for the chosen mode
+    if (currentMode === 'mrz') {
+        await cvr.initSettings('./full.json');
+    } else {
         await cvr.resetSettings();
-        cvr.startCapturing("ReadBarcodes_Default");
-    } else if (currentMode === "document") {
-        cameraEnhancer.setScanRegion(null);
-        await cvr.resetSettings();
-        let params = await cvr.getSimplifiedSettings("DetectDocumentBoundaries_Default");
-        params.outputOriginalImage = true;
-        await cvr.updateSettings("DetectDocumentBoundaries_Default", params);
-        cvr.startCapturing("DetectDocumentBoundaries_Default");
     }
+
+    isDetecting = true;
+
+    // Native camera: frames arrive from C# – just set the flag
+    if (useNativeCamera) return;
+
+    // Web camera: capture frames in a loop
+    isProcessingFrame = false;
+    let tempCanvas = document.createElement('canvas');
+    let tempCtx = tempCanvas.getContext('2d');
+
+    const scanFrame = async () => {
+        if (!isDetecting) return;
+
+        if (videoElement && videoElement.readyState >= 2 && !isProcessingFrame) {
+            if (cameraOverlay) {
+                if (cameraOverlay.width !== videoElement.videoWidth ||
+                    cameraOverlay.height !== videoElement.videoHeight) {
+                    cameraOverlay.width = videoElement.videoWidth;
+                    cameraOverlay.height = videoElement.videoHeight;
+                }
+            }
+
+            tempCanvas.width = videoElement.videoWidth;
+            tempCanvas.height = videoElement.videoHeight;
+            tempCtx.drawImage(videoElement, 0, 0);
+
+            isProcessingFrame = true;
+            try {
+                let result = await cvr.capture(tempCanvas, getTemplateName());
+                if (result) {
+                    await processCameraResult(result, tempCanvas);
+                }
+            } catch (ex) {
+                console.error('Scanning error:', ex);
+            }
+            isProcessingFrame = false;
+        }
+
+        if (isDetecting) {
+            cameraAnimationFrame = requestAnimationFrame(scanFrame);
+        }
+    };
+
+    cameraAnimationFrame = requestAnimationFrame(scanFrame);
 }
 
 async function stopScanning() {
-    if (!isDetecting) return;
     isDetecting = false;
-    if (cvr != null) {
-        await cvr.stopCapturing();
+
+    if (cameraAnimationFrame) {
+        cancelAnimationFrame(cameraAnimationFrame);
+        cameraAnimationFrame = null;
     }
-    if (cameraView) {
-        cameraView.clearAllInnerDrawingItems();
+
+    isProcessingFrame = false;
+    nativeFrameProcessing = false;
+
+    if (cameraOverlay) {
+        cameraOverlay.getContext('2d').clearRect(0, 0, cameraOverlay.width, cameraOverlay.height);
     }
+}
+
+// ── Native camera frame handling (macOS) ────────────────────────────────────
+
+async function onNativeCameraFrame(base64DataUrl) {
+    if (!isSDKReady || !cvr) return;
+
+    // Always update the preview image
+    if (nativeCameraImg) {
+        nativeCameraImg.src = base64DataUrl;
+    }
+
+    if (nativeFrameProcessing || !isDetecting) return;
+
+    nativeFrameProcessing = true;
+    try {
+        let result = await cvr.capture(base64DataUrl, getTemplateName());
+        if (result) {
+            await processCameraResult(result, base64DataUrl);
+        }
+    } catch (ex) {
+        console.error('onNativeCameraFrame error:', ex);
+        // Silently continue on individual frame errors
+    }
+    nativeFrameProcessing = false;
 }
 
 // ── EXIF orientation helpers ─────────────────────────────────────────────────
@@ -439,19 +621,6 @@ function applyOrientation(img, orientation) {
     return canvas;
 }
 
-async function initCamera() {
-    if (!Dynamsoft) return null;
-    try {
-        cameraView = await Dynamsoft.DCE.CameraView.createInstance();
-        cameraEnhancer = await Dynamsoft.DCE.CameraEnhancer.createInstance(cameraView);
-        cameras = await cameraEnhancer.getAllCameras();
-        return cameras.map(c => c.label);
-    } catch (ex) {
-        console.error(ex);
-        return null;
-    }
-}
-
 window.jsFunctions = {
     initSDK: async function (dotnetRef, licenseKey) {
         dotnetHelper = dotnetRef;
@@ -471,11 +640,6 @@ window.jsFunctions = {
             await Dynamsoft.CVR.CaptureVisionRouter.appendDLModelBuffer("MRZTextLineRecognition");
 
             cvr = await Dynamsoft.CVR.CaptureVisionRouter.createInstance();
-            cvr.addResultReceiver({
-                onCapturedResultReceived: (result) => {
-                    showCameraResult(result);
-                }
-            });
 
             isSDKReady = true;
             toggleLoading(false);
@@ -487,68 +651,116 @@ window.jsFunctions = {
         }
     },
 
-    initScanner: async function (dotnetRef, cameraViewId, cameraSelectId, mode) {
+    // ── Web camera init (getUserMedia) ───────────────────────────────────────
+    initScanner: async function (dotnetRef, cameraViewId, mode) {
         dotnetHelper = dotnetRef;
         currentMode = mode;
+        useNativeCamera = false;
 
-        if (cameraEnhancer == null) {
-            let cameraLabels = await initCamera();
-            if (cameraLabels == null || cameraLabels.length === 0) {
-                return [];
-            }
+        const container = document.getElementById(cameraViewId);
+        if (!container) return [];
 
-            try {
-                let uiElement = document.getElementById(cameraViewId);
-                uiElement.append(cameraView.getUIElement());
-                let shadowRoot = cameraView.getUIElement().shadowRoot;
-                if (shadowRoot) {
-                    let selCamera = shadowRoot.querySelector('.dce-sel-camera');
-                    if (selCamera) selCamera.style.display = 'none';
-                    let selResolution = shadowRoot.querySelector('.dce-sel-resolution');
-                    if (selResolution) selResolution.style.display = 'none';
-                }
-            } catch (ex) {
-                console.error(ex);
-            }
+        container.innerHTML = '';
+        container.style.position = 'relative';
 
-            return cameraLabels;
-        }
+        videoElement = document.createElement('video');
+        videoElement.autoplay = true;
+        videoElement.playsInline = true;
+        videoElement.muted = true;
+        videoElement.style.cssText = 'width:100%; display:none;';
+        container.appendChild(videoElement);
 
-        // cameraEnhancer already exists (re-navigation) — re-attach the camera
-        // view UI element to the freshly-rendered DOM container.
+        cameraOverlay = document.createElement('canvas');
+        cameraOverlay.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;';
+        container.appendChild(cameraOverlay);
+
         try {
-            const uiElement = document.getElementById(cameraViewId);
-            const camUI = cameraView.getUIElement();
-            if (uiElement && !uiElement.contains(camUI)) {
-                uiElement.append(camUI);
-            }
+            let tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            tempStream.getTracks().forEach(track => track.stop());
+            let devices = await navigator.mediaDevices.enumerateDevices();
+            availableCameras = devices.filter(d => d.kind === 'videoinput');
+            return availableCameras.map((cam, i) => cam.label || `Camera ${i + 1}`);
         } catch (ex) {
-            console.error('initScanner re-attach error:', ex);
+            console.error('Camera enumeration error:', ex);
+            return [];
         }
+    },
 
-        return cameras ? cameras.map(c => c.label) : [];
+    // ── Native camera init (macOS) ───────────────────────────────────────────
+    initNativeScanner: async function (dotnetRef, cameraViewId, mode) {
+        dotnetHelper = dotnetRef;
+        currentMode = mode;
+        useNativeCamera = true;
+
+        const container = document.getElementById(cameraViewId);
+        if (!container) return [];
+
+        container.innerHTML = '';
+        container.style.position = 'relative';
+
+        nativeCameraImg = document.createElement('img');
+        nativeCameraImg.style.cssText = 'width:100%; display:block;';
+        container.appendChild(nativeCameraImg);
+
+        cameraOverlay = document.createElement('canvas');
+        cameraOverlay.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;';
+        container.appendChild(cameraOverlay);
+
+        // Sync canvas logical size to JPEG natural dimensions whenever a new frame loads
+        nativeCameraImg.addEventListener('load', () => {
+            const nw = nativeCameraImg.naturalWidth;
+            const nh = nativeCameraImg.naturalHeight;
+            if (nw > 0 && nh > 0 && cameraOverlay &&
+                (cameraOverlay.width !== nw || cameraOverlay.height !== nh)) {
+                cameraOverlay.width  = nw;
+                cameraOverlay.height = nh;
+            }
+        });
+
+        return [];
     },
 
     openCamera: async function (index) {
-        if (cameras && cameras.length > index) {
-            let wasDetecting = isDetecting;
-            if (wasDetecting) {
-                await stopScanning();
-            }
-            try {
-                await cameraEnhancer.selectCamera(cameras[index]);
-                cameraEnhancer.on("played", function () {
-                    resolution = cameraEnhancer.getResolution();
-                });
-                cameraEnhancer.setPixelFormat(10);
-                await cameraEnhancer.open();
-            } catch (ex) {
-                console.error(ex);
-            }
-            if (wasDetecting) {
-                await startScanning();
-            }
+        if (useNativeCamera) return;
+
+        const wasDetecting = isDetecting;
+        if (wasDetecting) await stopScanning();
+
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            cameraStream = null;
+            if (videoElement) videoElement.srcObject = null;
         }
+
+        if (!availableCameras || availableCameras.length === 0) return;
+
+        const camera = availableCameras[index] || availableCameras[0];
+        try {
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: camera.deviceId ? { exact: camera.deviceId } : undefined,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
+                audio: false
+            });
+            videoElement.srcObject = cameraStream;
+            await new Promise(resolve => {
+                if (videoElement.readyState >= 1) resolve();
+                else videoElement.onloadedmetadata = resolve;
+            });
+            await videoElement.play();
+            videoElement.style.display = 'block';
+
+            if (cameraOverlay) {
+                cameraOverlay.width = videoElement.videoWidth;
+                cameraOverlay.height = videoElement.videoHeight;
+            }
+        } catch (ex) {
+            console.error('openCamera error:', ex);
+        }
+
+        if (wasDetecting) await startScanning();
     },
 
     startScanning: async function (mode) {
@@ -560,15 +772,181 @@ window.jsFunctions = {
         await stopScanning();
     },
 
+    // ── JS-polls-C# native frame loop ────────────────────────────────────────
+    // Called instead of startScanning when useNativeCamera=true.
+    // Every 150ms it invokes GetLatestFrame on the C# component, which returns
+    // the latest JPEG base64 stored by MacCameraService (no JSRuntime push needed).
+    startNativePolling: async function (mode) {
+        currentMode = mode;
+
+        if (currentMode === 'mrz') {
+            await cvr.initSettings('./full.json');
+        } else {
+            await cvr.resetSettings();
+        }
+
+        isDetecting = true;
+        nativeFrameProcessing = false;
+
+        if (nativePollingTimer) clearInterval(nativePollingTimer);
+
+        nativePollingTimer = setInterval(async () => {
+            if (!isDetecting || !dotnetHelper) return;
+
+            let frame;
+            try {
+                frame = await dotnetHelper.invokeMethodAsync('GetLatestFrame');
+            } catch (ex) {
+                console.error('GetLatestFrame invoke error:', ex);
+                return;
+            }
+
+            if (!frame) return;
+
+            if (frame.startsWith('data:text/plain,')) return;
+
+            // Display frame
+            if (nativeCameraImg) nativeCameraImg.src = frame;
+
+            // Decode if SDK ready and not already processing
+            if (!nativeFrameProcessing && isSDKReady && cvr) {
+                nativeFrameProcessing = true;
+                try {
+                    let result = await cvr.capture(frame, getTemplateName());
+                    if (result) await processCameraResult(result, frame);
+                } catch (ex) {
+                    console.error('native poll capture error:', ex);
+                }
+                nativeFrameProcessing = false;
+            }
+        }, 150);
+    },
+
+    stopNativePolling: function () {
+        if (nativePollingTimer) {
+            clearInterval(nativePollingTimer);
+            nativePollingTimer = null;
+        }
+        isDetecting = false;
+        nativeFrameProcessing = false;
+    },
+
     closeCamera: async function () {
-        if (cameraEnhancer) {
-            await stopScanning();
-            await cameraEnhancer.close();
+        if (useNativeCamera) {
+            jsFunctions.stopNativePolling();
+            return;
+        }
+        await stopScanning();
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            cameraStream = null;
+            if (videoElement) videoElement.srcObject = null;
         }
     },
 
     captureDocument: function () {
         isCaptured = true;
+    },
+
+    onNativeFrame: async function (base64DataUrl) {
+        await onNativeCameraFrame(base64DataUrl);
+    },
+
+    // Reads the selected file directly in JS (no C# stream overhead), displays it,
+    // decodes it, and returns JSON { image, result } or { image, error }.
+    loadAndDecodeFile: async function (fileInputId, mode) {
+        if (!isSDKReady) return JSON.stringify({ error: 'SDK not ready' });
+
+        const input = document.getElementById(fileInputId);
+        if (!input || !input.files || input.files.length === 0) return null;
+
+        const file = input.files[0];
+
+        const overlayCanvas = document.getElementById('reader_overlay');
+        if (overlayCanvas) {
+            overlayCanvas.getContext('2d').clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+
+        // Read as ArrayBuffer to detect EXIF orientation, then decode image
+        const arrayBuffer = await file.arrayBuffer();
+        const orientation = getExifOrientation(arrayBuffer);
+        const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: file.type || 'image/jpeg' }));
+
+        let base64Image;
+        try {
+            base64Image = await new Promise((resolve, reject) => {
+                const tempImg = new Image();
+                tempImg.onload = function () {
+                    let canvas;
+                    if (orientation <= 1) {
+                        canvas = document.createElement('canvas');
+                        canvas.width = tempImg.naturalWidth;
+                        canvas.height = tempImg.naturalHeight;
+                        canvas.getContext('2d').drawImage(tempImg, 0, 0);
+                    } else {
+                        canvas = applyOrientation(tempImg, orientation);
+                    }
+                    URL.revokeObjectURL(blobUrl);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+                    const imgEl = document.getElementById('reader_image');
+                    if (imgEl) { imgEl.src = dataUrl; imgEl.style.display = 'block'; }
+                    resolve(dataUrl);
+                };
+                tempImg.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error('Failed to load image')); };
+                tempImg.src = blobUrl;
+            });
+        } catch (ex) {
+            return JSON.stringify({ error: ex.message });
+        }
+
+        try {
+            let result;
+            if (mode === 'barcode') {
+                await cvr.resetSettings();
+                result = await cvr.capture(base64Image, 'ReadBarcodes_Default');
+                const txts = [], locs = [];
+                for (let item of result.items) {
+                    if (item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_BARCODE) {
+                        txts.push(item.text);
+                        if (item.location?.points) locs.push(item.location.points);
+                    }
+                }
+                if (locs.length > 0) drawFileOverlay('reader_overlay', 'reader_image', locs, '#2e7d32', 'rgba(76,175,80,0.18)');
+                return JSON.stringify({ image: base64Image, result: txts.length > 0 ? txts.join('\n') : 'No barcode found' });
+
+            } else if (mode === 'mrz') {
+                await cvr.initSettings('./full.json');
+                result = await cvr.capture(base64Image, 'ReadMRZ');
+                const txts = [], locs = [];
+                let parseText = '';
+                for (let item of result.items) {
+                    if (item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_TEXT_LINE) {
+                        txts.push(item.text);
+                        if (item.location?.points) locs.push(item.location.points);
+                        const parsed = await parser.parse(item.text.replace(/\\n/g, ''));
+                        parseText = JSON.stringify(extractMrzInfo(parsed), null, 2);
+                    }
+                }
+                if (locs.length > 0) drawFileOverlay('reader_overlay', 'reader_image', locs, '#1565c0', 'rgba(102,126,234,0.18)');
+                const text = txts.length > 0 ? txts.join('\n') + '\n\n' + parseText : 'No MRZ found';
+                return JSON.stringify({ image: base64Image, result: text });
+
+            } else if (mode === 'document') {
+                await cvr.resetSettings();
+                result = await cvr.capture(base64Image, 'DetectDocumentBoundaries_Default');
+                for (let item of result.items) {
+                    if (item.type === Dynamsoft.Core.EnumCapturedResultItemType.CRIT_DETECTED_QUAD) {
+                        globalPoints = item.location.points;
+                        return JSON.stringify({ image: base64Image, result: JSON.stringify(globalPoints) });
+                    }
+                }
+                return JSON.stringify({ image: base64Image, result: 'No document found' });
+            }
+        } catch (ex) {
+            console.error('loadAndDecodeFile error:', ex);
+            return JSON.stringify({ image: base64Image, error: ex.message });
+        }
+        return JSON.stringify({ image: base64Image, result: 'Unknown mode' });
     },
 
     decodeFile: async function (dotnetRef, base64Image, mode) {

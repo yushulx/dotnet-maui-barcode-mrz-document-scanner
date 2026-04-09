@@ -4,6 +4,10 @@ using Microsoft.AspNetCore.Components.WebView;
 using BarcodeScanner.Platforms.Android;
 #endif
 
+#if MACCATALYST
+using WebKit;
+#endif
+
 namespace BarcodeScanner;
 
 public partial class WebContentPage : ContentPage
@@ -16,7 +20,7 @@ public partial class WebContentPage : ContentPage
 
     private void WebView_BlazorWebViewInitializing(object sender, BlazorWebViewInitializingEventArgs e)
     {
-#if IOS || MACCATALYST                   
+#if IOS || MACCATALYST
             e.Configuration.AllowsInlineMediaPlayback = true;
             e.Configuration.MediaTypesRequiringUserActionForPlayback = WebKit.WKAudiovisualMediaTypes.None;
 #endif

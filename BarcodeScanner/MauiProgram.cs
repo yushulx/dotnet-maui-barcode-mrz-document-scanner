@@ -1,5 +1,5 @@
 ﻿using Microsoft.AspNetCore.Components.WebView.Maui;
-
+using BarcodeScanner.Services;
 
 #if ANDROID
 using BarcodeScanner.Platforms.Android;
@@ -28,6 +28,12 @@ public static class MauiProgram
         builder.Services.AddMauiBlazorWebView();
 #if DEBUG
 		builder.Services.AddBlazorWebViewDeveloperTools();
+#endif
+
+#if MACCATALYST
+        builder.Services.AddSingleton<ICameraService, MacCameraService>();
+#else
+        builder.Services.AddSingleton<ICameraService, DefaultCameraService>();
 #endif
 
 		return builder.Build();

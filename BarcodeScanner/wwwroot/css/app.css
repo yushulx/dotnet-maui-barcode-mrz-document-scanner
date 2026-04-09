@@ -67,6 +67,22 @@ a, .btn-link {
     display: none;
 }
 
+/* MacCatalyst/Desktop: Ensure camera view container is visible and properly sized */
+#camera_view {
+    width: 100%;
+    min-height: 400px;
+    position: relative;
+    background-color: #000;
+    overflow: hidden;
+}
+
+#camera_view video,
+#camera_view canvas {
+    width: 100%;
+    max-width: 100%;
+    display: block;
+}
+
 @supports (-webkit-touch-callout: none) {
     .status-bar-safe-area {
         display: flex;

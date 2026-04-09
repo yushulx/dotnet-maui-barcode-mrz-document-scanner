@@ -4,7 +4,6 @@
 <dict>
 	<key>UIDeviceFamily</key>
 	<array>
-		<integer>1</integer>
 		<integer>2</integer>
 	</array>
 	<key>UIRequiredDeviceCapabilities</key>
@@ -32,5 +31,7 @@
 	<string>This app is saving photo to the library</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs access to microphone for taking videos.</string>
+	<key>NSCameraUseContinuityCameraDeviceTypes</key>
+	<true/>
 </dict>
 </plist>

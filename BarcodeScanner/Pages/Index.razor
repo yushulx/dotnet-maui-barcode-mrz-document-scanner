@@ -55,6 +55,25 @@
         objRef = DotNetObjectReference.Create(this);
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var status = await Permissions.CheckStatusAsync<Permissions.Camera>();
+                if (status != PermissionStatus.Granted)
+                {
+                    await Permissions.RequestAsync<Permissions.Camera>();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Permission check error: " + ex.Message);
+            }
+        }
+    }
+
     private async Task Activate()
     {
         if (string.IsNullOrWhiteSpace(licenseKey)) return;

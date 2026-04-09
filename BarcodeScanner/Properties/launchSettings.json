@@ -1,5 +1,9 @@
 {
   "profiles": {
+    "Mac Catalyst": {
+      "commandName": "MauiMac",
+      "nativeDebugging": false
+    },
     "Windows Machine": {
       "commandName": "MsixPackage",
       "nativeDebugging": false

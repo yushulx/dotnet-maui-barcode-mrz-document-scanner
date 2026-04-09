@@ -23,7 +23,7 @@
     </div>
 
     <div class="upload-section">
-        <InputFile OnChange="LoadImage" accept="image/*" />
+        <input type="file" id="reader_file_input" accept="image/*" @onchange="LoadImage" />
     </div>
 
     <div class="image-section">
@@ -117,7 +117,7 @@
         StateHasChanged();
     }
 
-    private async Task LoadImage(InputFileChangeEventArgs e)
+    private async Task LoadImage(ChangeEventArgs e)
     {
         result = "";
         showDocumentEditor = false;
@@ -127,24 +127,40 @@
 
         try
         {
-            var imageFile = e.File;
-            await using var jsImageStream = imageFile.OpenReadStream(1024 * 1024 * 20);
-            var dotnetImageStream = new DotNetStreamReference(jsImageStream);
+            // JS reads the file directly from the <input> element — no C# stream needed.
+            var json = await JSRuntime.InvokeAsync<string>(
+                "jsFunctions.loadAndDecodeFile", "reader_file_input", selectedMode);
 
-            currentImageBase64 = await JSRuntime.InvokeAsync<string>(
-                "jsFunctions.setImageUsingStreaming", objRef, "reader_image", dotnetImageStream, selectedMode);
-
-            if (!string.IsNullOrEmpty(currentImageBase64))
+            if (!string.IsNullOrEmpty(json))
             {
-                result = await JSRuntime.InvokeAsync<string>(
-                    "jsFunctions.decodeFile", objRef, currentImageBase64, selectedMode);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
 
-                if (selectedMode == "document" && result != "No document found" && !result.StartsWith("Error"))
+                if (root.TryGetProperty("error", out var errProp))
                 {
-                    detectedPointsJson = result;
-                    showDocumentEditor = true;
-                    _pendingQuadInit = true;
-                    result = "Document boundaries detected. Drag the corners to adjust, then tap Rectify.";
+                    result = "Error: " + errProp.GetString();
+                }
+                else
+                {
+                    currentImageBase64 = root.TryGetProperty("image", out var imgProp)
+                        ? imgProp.GetString() ?? "" : "";
+
+                    var decodeResult = root.TryGetProperty("result", out var resProp)
+                        ? resProp.GetString() ?? "" : "";
+
+                    if (selectedMode == "document" &&
+                        decodeResult != "No document found" &&
+                        !decodeResult.StartsWith("Error"))
+                    {
+                        detectedPointsJson = decodeResult;
+                        showDocumentEditor = true;
+                        _pendingQuadInit = true;
+                        result = "Document boundaries detected. Drag the corners to adjust, then tap Rectify.";
+                    }
+                    else
+                    {
+                        result = decodeResult;
+                    }
                 }
             }
         }

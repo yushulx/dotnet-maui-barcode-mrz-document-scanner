@@ -1,6 +1,8 @@
 @page "/scanner"
+@implements IAsyncDisposable
 
 @inject IJSRuntime JSRuntime
+@inject Services.ICameraService CameraService
 
 <div class="scanner-container">
     <div class="controls">
@@ -114,10 +116,16 @@
     private string capturedImage = "";
     private string capturedPointsJson = "";
     private string rectifiedImage = "";
+    private bool useNativeCamera => CameraService.RequiresNativeCamera;
 
     protected override void OnInitialized()
     {
         objRef = DotNetObjectReference.Create(this);
+
+        if (useNativeCamera)
+        {
+            CameraService.SetFrameCallback(OnNativeFrameReceived);
+        }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -135,14 +143,13 @@
                     isGranted = true;
                     StateHasChanged();
 
-                    cameraLabels = await JSRuntime.InvokeAsync<string[]>(
-                        "jsFunctions.initScanner", objRef, "camera_view", "camera_select", selectedMode);
-
-                    if (cameraLabels != null && cameraLabels.Length > 0)
+                    if (useNativeCamera)
                     {
-                        StateHasChanged();
-                        await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", 0);
-                        await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+                        await InitNativeCamera();
+                    }
+                    else
+                    {
+                        await InitWebCamera();
                     }
                 }
             }
@@ -169,6 +176,66 @@
                 Console.Error.WriteLine("Scanner quad editor init error: " + ex.Message);
             }
         }
+    }
+
+    private async Task InitWebCamera()
+    {
+        cameraLabels = await JSRuntime.InvokeAsync<string[]>(
+            "jsFunctions.initScanner", objRef, "camera_view", selectedMode);
+
+        if (cameraLabels != null && cameraLabels.Length > 0)
+        {
+            StateHasChanged();
+            await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", 0);
+            await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+        }
+    }
+
+    private async Task InitNativeCamera()
+    {
+        // Get camera list from native service
+        cameraLabels = await CameraService.GetAvailableCamerasAsync();
+        StateHasChanged();
+
+        // Initialize the JS-side native scanner (creates preview <img> and overlay canvas)
+        await JSRuntime.InvokeVoidAsync("jsFunctions.initNativeScanner", objRef, "camera_view", selectedMode);
+
+        // Open native camera
+        await CameraService.OpenCameraAsync(0);
+
+        // Start scanning: for native camera this just sets isDetecting=true.
+        // Frames arrive via C# callback → OnNativeFrameReceived → jsFunctions.onNativeFrame.
+        await JSRuntime.InvokeVoidAsync("jsFunctions.startScanning", selectedMode);
+    }
+
+    /// <summary>
+    /// Callback invoked when a native camera frame is received from AVFoundation.
+    /// Forward it to the JavaScript side for display and SDK processing.
+    /// <summary>
+    /// Called by the JS polling timer to retrieve the latest camera frame from C#.
+    /// Returns null when no new frame is available since last call.
+    /// </summary>
+    [JSInvokable]
+    public string? GetLatestFrame()
+    {
+        if (_disposed || !useNativeCamera) return null;
+        return CameraService.GetLatestFrame();
+    }
+
+    private void OnNativeFrameReceived(string base64DataUrl)
+    {
+        if (_disposed || !useNativeCamera) return;
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("jsFunctions.onNativeFrame", base64DataUrl);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("OnNativeFrameReceived JS error: " + ex.Message);
+            }
+        });
     }
 
     private async Task ChangeMode(string mode)
@@ -199,7 +266,14 @@
         {
             try
             {
-                await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", index);
+                if (useNativeCamera)
+                {
+                    await CameraService.OpenCameraAsync(index);
+                }
+                else
+                {
+                    await JSRuntime.InvokeVoidAsync("jsFunctions.openCamera", index);
+                }
             }
             catch (Exception ex)
             {
@@ -332,12 +406,14 @@
         InvokeAsync(StateHasChanged);
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         _disposed = true;
         objRef?.Dispose();
-        // Stop scanning and close camera so resources are freed when navigating away.
-        // Fire-and-forget is intentional here; Dispose cannot be async.
-        try { JSRuntime.InvokeVoidAsync("jsFunctions.closeCamera"); } catch { }
+        try { await JSRuntime.InvokeVoidAsync("jsFunctions.closeCamera"); } catch { }
+        if (useNativeCamera)
+        {
+            try { await CameraService.CloseCameraAsync(); } catch { }
+        }
     }
 }
