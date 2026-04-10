@@ -62,3 +62,5 @@ https://github.com/user-attachments/assets/64c35eaa-1f60-4de3-9f1f-68023c6cf613
 3. For **Document** mode, tap **Capture** when the detected boundary looks correct.
 4. Adjust the quad handles in the editor, tap **Rectify**, then **Save** to export.
 
+## Blog
+[How to Build a Cross-Platform Barcode, MRZ, and Document Scanner with .NET MAUI Blazor](https://www.dynamsoft.com/codepool/scan-barcodes-mrz-documents-dotnet-maui-blazor.html)
